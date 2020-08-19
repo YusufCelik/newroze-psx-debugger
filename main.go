@@ -9,6 +9,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jacobsa/go-serial/serial"
 )
@@ -28,14 +29,140 @@ type DebuggerState struct {
 
 type serialport io.ReadWriteCloser
 
+var targetDescriptionXML string = `<?xml version="1.0"?>
+<!DOCTYPE feature SYSTEM "gdb-target.dtd">
+<target version="1.0">
+<!-- Helping GDB -->
+<architecture>mips:3000</architecture>
+<osabi>none</osabi>
+<!-- Mapping ought to be flexible, but there seems to be some
+     hardcoded parts in gdb, so let's use the same mapping. -->
+<feature name="org.gnu.gdb.mips.cpu">
+  <reg name="r0" bitsize="32" regnum="0"/>
+  <reg name="r1" bitsize="32" regnum="1"/>
+  <reg name="r2" bitsize="32" regnum="2"/>
+  <reg name="r3" bitsize="32" regnum="3"/>
+  <reg name="r4" bitsize="32" regnum="4"/>
+  <reg name="r5" bitsize="32" regnum="5"/>
+  <reg name="r6" bitsize="32" regnum="6"/>
+  <reg name="r7" bitsize="32" regnum="7"/>
+  <reg name="r8" bitsize="32" regnum="8"/>
+  <reg name="r9" bitsize="32" regnum="9"/>
+  <reg name="r10" bitsize="32" regnum="10"/>
+  <reg name="r11" bitsize="32" regnum="11"/>
+  <reg name="r12" bitsize="32" regnum="12"/>
+  <reg name="r13" bitsize="32" regnum="13"/>
+  <reg name="r14" bitsize="32" regnum="14"/>
+  <reg name="r15" bitsize="32" regnum="15"/>
+  <reg name="r16" bitsize="32" regnum="16"/>
+  <reg name="r17" bitsize="32" regnum="17"/>
+  <reg name="r18" bitsize="32" regnum="18"/>
+  <reg name="r19" bitsize="32" regnum="19"/>
+  <reg name="r20" bitsize="32" regnum="20"/>
+  <reg name="r21" bitsize="32" regnum="21"/>
+  <reg name="r22" bitsize="32" regnum="22"/>
+  <reg name="r23" bitsize="32" regnum="23"/>
+  <reg name="r24" bitsize="32" regnum="24"/>
+  <reg name="r25" bitsize="32" regnum="25"/>
+  <reg name="r26" bitsize="32" regnum="26"/>
+  <reg name="r27" bitsize="32" regnum="27"/>
+  <reg name="r28" bitsize="32" regnum="28"/>
+  <reg name="r29" bitsize="32" regnum="29"/>
+  <reg name="r30" bitsize="32" regnum="30"/>
+  <reg name="r31" bitsize="32" regnum="31"/>
+  <reg name="lo" bitsize="32" regnum="33"/>
+  <reg name="hi" bitsize="32" regnum="34"/>
+  <reg name="pc" bitsize="32" regnum="37"/>
+</feature>
+<feature name="org.gnu.gdb.mips.cp0">
+  <reg name="status" bitsize="32" regnum="32"/>
+  <reg name="badvaddr" bitsize="32" regnum="35"/>
+  <reg name="cause" bitsize="32" regnum="36"/>
+  <reg name="dcic" bitsize="32" regnum="38"/>
+  <reg name="bpc" bitsize="32" regnum="39"/>
+  <reg name="tar" bitsize="32" regnum="40"/>
+</feature>
+<!-- We don't have an FPU, but gdb hardcodes one, and will choke
+     if this section isn't present. -->
+<feature name="org.gnu.gdb.mips.fpu">
+  <reg name="f0" bitsize="32" type="ieee_single" regnum="41"/>
+  <reg name="f1" bitsize="32" type="ieee_single"/>
+  <reg name="f2" bitsize="32" type="ieee_single"/>
+  <reg name="f3" bitsize="32" type="ieee_single"/>
+  <reg name="f4" bitsize="32" type="ieee_single"/>
+  <reg name="f5" bitsize="32" type="ieee_single"/>
+  <reg name="f6" bitsize="32" type="ieee_single"/>
+  <reg name="f7" bitsize="32" type="ieee_single"/>
+  <reg name="f8" bitsize="32" type="ieee_single"/>
+  <reg name="f9" bitsize="32" type="ieee_single"/>
+  <reg name="f10" bitsize="32" type="ieee_single"/>
+  <reg name="f11" bitsize="32" type="ieee_single"/>
+  <reg name="f12" bitsize="32" type="ieee_single"/>
+  <reg name="f13" bitsize="32" type="ieee_single"/>
+  <reg name="f14" bitsize="32" type="ieee_single"/>
+  <reg name="f15" bitsize="32" type="ieee_single"/>
+  <reg name="f16" bitsize="32" type="ieee_single"/>
+  <reg name="f17" bitsize="32" type="ieee_single"/>
+  <reg name="f18" bitsize="32" type="ieee_single"/>
+  <reg name="f19" bitsize="32" type="ieee_single"/>
+  <reg name="f20" bitsize="32" type="ieee_single"/>
+  <reg name="f21" bitsize="32" type="ieee_single"/>
+  <reg name="f22" bitsize="32" type="ieee_single"/>
+  <reg name="f23" bitsize="32" type="ieee_single"/>
+  <reg name="f24" bitsize="32" type="ieee_single"/>
+  <reg name="f25" bitsize="32" type="ieee_single"/>
+  <reg name="f26" bitsize="32" type="ieee_single"/>
+  <reg name="f27" bitsize="32" type="ieee_single"/>
+  <reg name="f28" bitsize="32" type="ieee_single"/>
+  <reg name="f29" bitsize="32" type="ieee_single"/>
+  <reg name="f30" bitsize="32" type="ieee_single"/>
+  <reg name="f31" bitsize="32" type="ieee_single"/>
+  <reg name="fcsr" bitsize="32" group="float"/>
+  <reg name="fir" bitsize="32" group="float"/>
+</feature>
+</target>`
+
+var memoryMapXML string = `<?xml version="1.0"?>
+<memory-map>
+  <!-- Everything here is described as RAM, because we don't really
+       have any better option. -->
+  <!-- Main memory bloc: let's go with 8MB straight off the bat. -->
+  <memory type="ram" start="0x0000000000000000" length="0x800000"/>
+  <memory type="ram" start="0xffffffff80000000" length="0x800000"/>
+  <memory type="ram" start="0xffffffffa0000000" length="0x800000"/>
+  <!-- EXP1 can go up to 8MB too. -->
+  <memory type="ram" start="0x000000001f000000" length="0x800000"/>
+  <memory type="ram" start="0xffffffff9f000000" length="0x800000"/>
+  <memory type="ram" start="0xffffffffbf000000" length="0x800000"/>
+  <!-- Scratchpad -->
+  <memory type="ram" start="0x000000001f800000" length="0x400"/>
+  <memory type="ram" start="0xffffffff9f800000" length="0x400"/>
+  <!-- Hardware registers -->
+  <memory type="ram" start="0x000000001f801000" length="0x2000"/>
+  <memory type="ram" start="0xffffffff9f801000" length="0x2000"/>
+  <memory type="ram" start="0xffffffffbf801000" length="0x2000"/>
+  <!-- DTL BIOS SRAM -->
+  <memory type="ram" start="0x000000001fa00000" length="0x200000"/>
+  <memory type="ram" start="0xffffffff9fa00000" length="0x200000"/>
+  <memory type="ram" start="0xffffffffbfa00000" length="0x200000"/>
+  <!-- BIOS -->
+  <memory type="ram" start="0x000000001fc00000" length="0x80000"/>
+  <memory type="ram" start="0xffffffff9fc00000" length="0x80000"/>
+  <memory type="ram" start="0xffffffffbfc00000" length="0x80000"/>
+  <!-- This really is only for 0xfffe0130 -->
+  <memory type="ram" start="0xfffffffffffe0000" length="0x200"/>
+</memory-map>`
+
 func initializeSerialPort(device string, baud int) serialport {
 	options := serial.OpenOptions{
 		PortName:              device,
 		BaudRate:              uint(baud),
 		DataBits:              8,
 		StopBits:              1,
-		InterCharacterTimeout: 100,
+		ParityMode:            serial.PARITY_NONE,
+		InterCharacterTimeout: 300,
 		MinimumReadSize:       0,
+		RTSCTSFlowControl:     true,
 	}
 
 	port, err := serial.Open(options)
@@ -106,16 +233,27 @@ func parseBreakpointWrite(buffer string) string {
 	return addr
 }
 
+func waitTillBufferIsEmpty(serialPort serialport) {
+	tmpBuffer := make([]byte, 1)
+
+	for {
+		_, err := serialPort.Read(tmpBuffer)
+
+		if err != nil {
+			break
+		}
+	}
+}
+
 func acknowledgeResponse(serialPort serialport) bool {
 	tmpBuffer := make([]byte, 1)
 
 	for {
 		_, err := serialPort.Read(tmpBuffer)
-		fmt.Println(string(tmpBuffer))
+		fmt.Println("reading from port")
 
 		if err != nil {
-			fmt.Println("Could not read registers from PSX", err, tmpBuffer)
-			break
+			fmt.Println("Could not read acknowledgement from PSX", err, tmpBuffer)
 		}
 
 		if string(tmpBuffer) == "+" {
@@ -129,18 +267,14 @@ func acknowledgeResponse(serialPort serialport) bool {
 			return false
 		}
 	}
-
-	return false
 }
 
 func writeMemoryCommandToPsx(serialPort serialport) {
-	nw, werr := serialPort.Write([]byte(formatGdbPacket("M")))
+	_, werr := serialPort.Write([]byte(formatGdbPacket("M")))
 
 	if werr != nil {
 		fmt.Println("Could not write bytes")
 	}
-
-	fmt.Println("wrote", nw)
 
 	res := acknowledgeResponse(serialPort)
 
@@ -151,13 +285,11 @@ func writeMemoryCommandToPsx(serialPort serialport) {
 }
 
 func writeCommandToPsx(serialPort serialport, cmd string) {
-	nw, werr := serialPort.Write([]byte(formatGdbPacket(cmd)))
+	_, werr := serialPort.Write([]byte(formatGdbPacket(cmd)))
 
 	if werr != nil {
 		fmt.Println("Could not write bytes")
 	}
-
-	fmt.Println("wrote", nw)
 
 	res := acknowledgeResponse(serialPort)
 
@@ -168,13 +300,11 @@ func writeCommandToPsx(serialPort serialport, cmd string) {
 }
 
 func writeAddressToPsx(serialPort serialport, addr string) {
-	nw, werr := serialPort.Write([]byte(formatGdbPacket(addr)))
+	_, werr := serialPort.Write([]byte(formatGdbPacket(addr)))
 
 	if werr != nil {
 		fmt.Println("Could not write bytes")
 	}
-
-	fmt.Println("wrote", nw)
 
 	res := acknowledgeResponse(serialPort)
 
@@ -186,18 +316,16 @@ func writeAddressToPsx(serialPort serialport, addr string) {
 }
 
 func writePacketSizeToPsx(serialPort serialport, size string) {
-	nw, werr := serialPort.Write([]byte(formatGdbPacket(size)))
+	_, werr := serialPort.Write([]byte(formatGdbPacket(size)))
 
 	if werr != nil {
 		fmt.Println("Could not write bytes")
 	}
 
-	fmt.Println("wrote", nw)
-
 	res := acknowledgeResponse(serialPort)
 
 	if res == false {
-		fmt.Println("failed to write size")
+		fmt.Println("failed writePacketSizeToPsx")
 
 		writePacketSizeToPsx(serialPort, size)
 	}
@@ -218,64 +346,71 @@ func writeChecksumToPsx(serialPort serialport, data []byte) {
 		hexChecksum = "0" + hexChecksum
 	}
 
-	nw, werr := serialPort.Write([]byte(formatGdbPacket(hexChecksum)))
+	_, werr := serialPort.Write([]byte(formatGdbPacket(hexChecksum)))
 
 	if werr != nil {
 		fmt.Println("Could not write bytes")
 	}
 
-	fmt.Println("wrote", nw)
-
 	res := acknowledgeResponse(serialPort)
 
 	if res == false {
-		fmt.Println("failed to write size")
+		fmt.Println("failed writeChecksumToPsx")
 
 		writeChecksumToPsx(serialPort, data)
 	}
 }
 
 func writeDataToPsx(serialPort serialport, data []byte) {
-	nw, werr := serialPort.Write(data)
+	num, werr := serialPort.Write(data)
+
+	fmt.Println("wrote num bytes: ", num)
 
 	if werr != nil {
 		fmt.Println("Could not write bytes")
 	}
 
-	fmt.Println("wrote", nw)
-
 	res := acknowledgeResponse(serialPort)
 
 	if res == false {
-		fmt.Println("failed to write size")
+		fmt.Println("failed writeDataToPsx")
 
 		writeDataToPsx(serialPort, data)
 	}
 }
 
 func writeMemoryToPsx(serialPort serialport, addr string, size string, data []byte) {
-	fmt.Println("Writing memory command")
 	writeMemoryCommandToPsx(serialPort)
-
-	fmt.Println("Writing address command")
 	writeAddressToPsx(serialPort, addr)
-
-	fmt.Println("Writing size command")
 	writePacketSizeToPsx(serialPort, size)
-
-	fmt.Println("Writing checksum command")
 	writeChecksumToPsx(serialPort, data)
-
-	fmt.Println("Writing data command")
+	fmt.Println("data is: ", string(data), data)
 	writeDataToPsx(serialPort, data)
 }
 
 func writeRegisterToPsx(serialPort serialport, addr string) {
-	fmt.Println("Writing memory command")
 	writeCommandToPsx(serialPort, "P")
-
-	fmt.Println("Writing address command")
 	writeAddressToPsx(serialPort, addr)
+}
+
+func hexStrToInt(hexStr string) uint32 {
+	hexBytes, err := hex.DecodeString(hexStr)
+
+	if err != nil {
+		fmt.Println("Could not decode hexStr")
+	}
+
+	hexInt := binary.LittleEndian.Uint32(hexBytes[0:])
+
+	return hexInt
+}
+
+func intToHexString(data uint32) string {
+	return fmt.Sprintf("%08x", data)
+}
+
+func byteToInt(data []byte) uint32 {
+	return binary.BigEndian.Uint32(data)
 }
 
 func clearMemoryOnPsx(serialPort serialport) {
@@ -571,8 +706,6 @@ func testWriteMemoryOnPsx(serialPort serialport) {
 }
 
 func readAllPsxRegisters(port serialport) string {
-	fmt.Println("Writing register command")
-
 	registersBuffer := make([]byte, 152)
 	writeCommandToPsx(port, "g")
 
@@ -587,10 +720,29 @@ func readAllPsxRegisters(port serialport) string {
 	return formatGdbPacket(registers)
 }
 
+func requestNonGeneralRegister(port serialport, regNum string) string {
+	writeCommandToPsx(port, "p")
+	writeAddressToPsx(port, regNum)
+
+	regDataBuffer := make([]byte, 8)
+
+	port.Read(regDataBuffer)
+
+	hexInt := hexStrToInt(string(regDataBuffer))
+
+	hexStr := intToHexString(hexInt)
+
+	fmt.Println(string(regDataBuffer), hexInt, hexStr)
+
+	return hexStr
+}
+
 func readPsxRegister(port serialport) []byte {
 	port.Write([]byte("#"))
 	registerBuffer := make([]byte, 8)
 	port.Read(registerBuffer)
+
+	fmt.Println("reg serial res: ", string(registerBuffer), registerBuffer)
 
 	regHexStr, _ := hex.DecodeString(string(registerBuffer))
 	byteReg := make([]byte, 4)
@@ -604,13 +756,8 @@ func readPsxRegister(port serialport) []byte {
 }
 
 func readPsxMemory(serialPort serialport, addr string, sizeStr string) string {
-	fmt.Println("Writing memory command")
 	writeCommandToPsx(serialPort, "m")
-
-	fmt.Println("Writing address command")
 	writeAddressToPsx(serialPort, addr)
-
-	fmt.Println("Writing size command")
 	writePacketSizeToPsx(serialPort, sizeStr)
 
 	size, _ := strconv.ParseUint(sizeStr, 16, 32)
@@ -626,6 +773,7 @@ func readPsxMemory(serialPort serialport, addr string, sizeStr string) string {
 		x++
 	}
 
+	fmt.Println(string(memoryData))
 	return formatGdbPacket(string(memoryData))
 }
 
@@ -646,24 +794,10 @@ func main() {
 	fmt.Println("device: ", serialConfig.device)
 	fmt.Println("tcp port", gdbConfig.tcpPort)
 
-	gdbHexStr, _ := hex.DecodeString("d0febd272c01bfaf2801beaf25f0a0033001c4")
-
-	if len(gdbHexStr)%2 != 0 {
-		paddedHexStr := make([]byte, len(gdbHexStr)+1)
-		copy(paddedHexStr, gdbHexStr[0:])
-		gdbHexStr = paddedHexStr
-	}
-
-	for i := 0; i < len(gdbHexStr); i += 4 {
-		converted := binary.LittleEndian.Uint32(gdbHexStr[i:])
-		fmt.Printf("%#08x \n", converted)
-	}
-
 	port := initializeSerialPort(serialConfig.device, int(serialConfig.baud))
 
-	// fmt.Println(memoryInValidRange("51ffec0"))
-
-	//fmt.Println(readPsxMemory(port, "051ffec0", "40"))
+	a := hexStrToInt("981f0180")
+	fmt.Println(intToHexString(a))
 
 	listener, err := net.Listen("tcp", ":"+*tcpPortPtr)
 
@@ -679,6 +813,7 @@ func main() {
 		}
 
 		handleGdbClient(conn, port, &debuggerState)
+		time.Sleep(50 * time.Millisecond)
 	}
 
 	defer port.Close()
@@ -735,7 +870,7 @@ func readMemory(serialPort serialport, request string) string {
 }
 
 func cleanupSerialData(data string) string {
-	fmt.Println(data)
+	fmt.Println("Cleaning up this data: ", data)
 	startIndex := strings.Index(data, "$")
 
 	if startIndex == -1 {
@@ -790,10 +925,15 @@ func sendSerialCommand(serialPort serialport, cmd string) string {
 }
 
 func memoryInValidRange(addr string) bool {
-	memHexBytes, _ := hex.DecodeString(addr)
+	memHexBytes, err := hex.DecodeString(addr)
+
+	if err != nil {
+		fmt.Println("Could not decode hex address", addr)
+	}
+
 	memInt := binary.BigEndian.Uint32(memHexBytes)
 
-	if memInt > 0x80000000 {
+	if memInt > 0x80010000 && memInt < 0x801FFF00 {
 		return true
 	}
 
@@ -801,7 +941,7 @@ func memoryInValidRange(addr string) bool {
 }
 
 func parseGdbRequest(conn net.Conn, serialPort serialport, request string, debuggerState *DebuggerState) {
-	var emptyResponsesFor = []string{"qTStatus", "vMustReplyEmpty", "qC", "vCont?", "X", "qSymbol::"}
+	var emptyResponsesFor = []string{"qTStatus", "vMustReplyEmpty", "qC", "vCont?", "qSymbol::"}
 	var okResponseFor = []string{"Hg0", "Hg1", "Hc-1", "Hc0", "Hc1", "qThreadExtraInfo", "qfThreadInfo", "qsThreadInfo"}
 
 	acknowledged := getPredefinedResponse(conn, request, emptyResponsesFor, acknowledgeWithEmpty)
@@ -816,7 +956,81 @@ func parseGdbRequest(conn net.Conn, serialPort serialport, request string, debug
 		return
 	}
 
+	fmt.Println("REQ: ", request)
+
 	switch {
+	case strings.Contains(request, "qXfer:features:read:target.xml"):
+		fmt.Println("going to write desc xml")
+		xmlStartIndex := strings.Index(request, "xml")
+		argOneIndex := xmlStartIndex + strings.Index(request[xmlStartIndex:], ":")
+		argTwoIndex := xmlStartIndex + strings.Index(request[xmlStartIndex:], ",")
+
+		argOneStr := request[argOneIndex+1 : argTwoIndex]
+		argTwoStr := request[argTwoIndex+1:]
+
+		for len(argOneStr) < 8 {
+			argOneStr = "0" + argOneStr
+		}
+
+		for len(argTwoStr) < 8 {
+			argTwoStr = "0" + argTwoStr
+		}
+
+		dataOffsetBytes, _ := hex.DecodeString(argOneStr)
+		dataLengthBytes, _ := hex.DecodeString(argTwoStr)
+
+		dataOffset := binary.BigEndian.Uint32(dataOffsetBytes)
+		dataLength := binary.BigEndian.Uint32(dataLengthBytes)
+
+		targetDescriptionBinXML := []byte(targetDescriptionXML)
+
+		conn.Write([]byte("+"))
+
+		fmt.Printf("%d %d %d\n", len(targetDescriptionBinXML), dataOffset, dataLength)
+		if len(targetDescriptionBinXML) > (int(dataOffset) + int(dataLength)) {
+			conn.Write([]byte(formatGdbPacket("m" + string(targetDescriptionBinXML[dataOffset:dataOffset+dataLength]))))
+		} else if len(targetDescriptionBinXML) > int(dataOffset) {
+			conn.Write([]byte(formatGdbPacket("l" + string(targetDescriptionBinXML[dataOffset:]))))
+		} else {
+			break
+		}
+	case strings.Contains(request, "qXfer:memory-map:read::"):
+		xmlStartIndex := strings.Index(request, "read")
+		argOneIndex := xmlStartIndex + strings.Index(request[xmlStartIndex:], "::")
+		argTwoIndex := xmlStartIndex + strings.Index(request[xmlStartIndex:], ",")
+
+		argOneStr := request[argOneIndex+2 : argTwoIndex]
+		argTwoStr := request[argTwoIndex+1:]
+
+		for len(argOneStr) < 8 {
+			argOneStr = "0" + argOneStr
+		}
+
+		for len(argTwoStr) < 8 {
+			argTwoStr = "0" + argTwoStr
+		}
+
+		dataOffsetBytes, _ := hex.DecodeString(argOneStr)
+		dataLengthBytes, _ := hex.DecodeString(argTwoStr)
+
+		dataOffset := binary.BigEndian.Uint32(dataOffsetBytes)
+		dataLength := binary.BigEndian.Uint32(dataLengthBytes)
+
+		targetDescriptionBinXML := []byte(memoryMapXML)
+
+		conn.Write([]byte("+"))
+
+		fmt.Printf("%d %d %d\n", len(targetDescriptionBinXML), dataOffset, dataLength)
+		if len(targetDescriptionBinXML) > (int(dataOffset) + int(dataLength)) {
+			conn.Write([]byte(formatGdbPacket("m" + string(targetDescriptionBinXML[dataOffset:dataOffset+dataLength]))))
+		} else if len(targetDescriptionBinXML) > int(dataOffset) {
+			conn.Write([]byte(formatGdbPacket("l" + string(targetDescriptionBinXML[dataOffset:]))))
+		} else {
+			break
+		}
+	case strings.Contains(request, "qXfer:threads:read::"):
+		conn.Write([]byte("+"))
+		conn.Write([]byte(formatGdbPacket("l<?xml version=\"1.0\"?><threads></threads>")))
 	case string(request[0]) == "g":
 		conn.Write([]byte("+"))
 		conn.Write([]byte(readAllPsxRegisters(serialPort)))
@@ -824,7 +1038,7 @@ func parseGdbRequest(conn net.Conn, serialPort serialport, request string, debug
 		conn.Write([]byte("+"))
 		mAddr, mSize := parseMemoryRead(request)
 
-		if mAddr == "00000000" {
+		if !memoryInValidRange(mAddr) {
 			conn.Write([]byte(formatGdbPacket("")))
 			break
 		}
@@ -836,26 +1050,43 @@ func parseGdbRequest(conn net.Conn, serialPort serialport, request string, debug
 		writeMemoryToPsx(serialPort, mAddr, mSize, mData)
 		acknowledgeWithOk(conn)
 	case string(request[0]) == "p":
-		fmt.Println("reading a register")
+		regNum := request[1:]
+
+		conn.Write([]byte("+"))
+		if regNum == "49" {
+			conn.Write([]byte(formatGdbPacket("00000000")))
+		}
+		if regNum == "4a" {
+			conn.Write([]byte(formatGdbPacket("00000000")))
+		}
+		if regNum == "26" {
+			conn.Write([]byte(formatGdbPacket(requestNonGeneralRegister(serialPort, regNum))))
+		}
+		if regNum == "27" {
+			conn.Write([]byte(formatGdbPacket(requestNonGeneralRegister(serialPort, regNum))))
+		}
+		if regNum == "28" {
+			conn.Write([]byte(formatGdbPacket(requestNonGeneralRegister(serialPort, regNum))))
+		}
+	case string(request[0]) == "X":
 		conn.Write([]byte("+"))
 		conn.Write([]byte(formatGdbPacket("")))
 	case string(request[0]) == "P":
 		pAddr := parseRegisterAddress(request)
 		debuggerState.continueAddress = pAddr
-		fmt.Println("writing a register")
+		writeRegisterToPsx(serialPort, pAddr)
 		conn.Write([]byte("+"))
 		acknowledgeWithOk(conn)
 	case string(request[0]) == "c":
 		writeCommandToPsx(serialPort, "c")
-		fmt.Println("Writing address command")
 		writeAddressToPsx(serialPort, debuggerState.continueAddress)
+		fmt.Println("continuing at", debuggerState.continueAddress)
 		conn.Write([]byte("+"))
 		conn.Write([]byte(formatGdbPacket("S05")))
 	case string(request[0]) == "Z":
 		bAddr := parseBreakpointWrite(request)
 		debuggerState.continueAddress = bAddr
 		writeCommandToPsx(serialPort, "Z")
-		fmt.Println("Writing address command")
 		writeAddressToPsx(serialPort, bAddr)
 		acknowledgeResponse(serialPort)
 		conn.Write([]byte("+"))
@@ -868,10 +1099,12 @@ func parseGdbRequest(conn net.Conn, serialPort serialport, request string, debug
 		conn.Write([]byte("+"))
 		conn.Write([]byte(formatGdbPacket("OK")))
 	case string(request[0]) == "s":
+		writeCommandToPsx(serialPort, "s")
+
 		conn.Write([]byte("+"))
 		conn.Write([]byte(formatGdbPacket("S05")))
 	case strings.Contains(request, "qSupported"):
-		msg := "PacketSize=200"
+		msg := "PacketSize=180;qXfer:features:read+"
 		conn.Write([]byte("+"))
 		conn.Write([]byte(formatGdbPacket(msg)))
 	case string(request[0]) == "?":
