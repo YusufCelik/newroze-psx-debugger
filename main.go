@@ -9,7 +9,6 @@ import (
 	"net"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/jacobsa/go-serial/serial"
 )
@@ -246,17 +245,17 @@ func waitTillBufferIsEmpty(serialPort serialport) {
 }
 
 func acknowledgeResponse(serialPort serialport) bool {
-	tmpBuffer := make([]byte, 1)
+	tmpBuffer := make([]byte, 4)
 
 	for {
 		_, err := serialPort.Read(tmpBuffer)
-		fmt.Println("reading from port")
+		fmt.Println("reading from port", tmpBuffer, string(tmpBuffer))
 
 		if err != nil {
 			fmt.Println("Could not read acknowledgement from PSX", err, tmpBuffer)
 		}
 
-		if string(tmpBuffer) == "+" {
+		if strings.Contains(string(tmpBuffer), "+") {
 			fmt.Println("Acknowledgment came")
 			serialPort.Write([]byte("+"))
 			return true
@@ -368,14 +367,6 @@ func writeDataToPsx(serialPort serialport, data []byte) {
 
 	if werr != nil {
 		fmt.Println("Could not write bytes")
-	}
-
-	res := acknowledgeResponse(serialPort)
-
-	if res == false {
-		fmt.Println("failed writeDataToPsx")
-
-		writeDataToPsx(serialPort, data)
 	}
 }
 
@@ -813,7 +804,6 @@ func main() {
 		}
 
 		handleGdbClient(conn, port, &debuggerState)
-		time.Sleep(50 * time.Millisecond)
 	}
 
 	defer port.Close()
@@ -1079,8 +1069,6 @@ func parseGdbRequest(conn net.Conn, serialPort serialport, request string, debug
 		acknowledgeWithOk(conn)
 	case string(request[0]) == "c":
 		writeCommandToPsx(serialPort, "c")
-		writeAddressToPsx(serialPort, debuggerState.continueAddress)
-		fmt.Println("continuing at", debuggerState.continueAddress)
 		conn.Write([]byte("+"))
 		conn.Write([]byte(formatGdbPacket("S05")))
 	case string(request[0]) == "Z":
@@ -1104,7 +1092,7 @@ func parseGdbRequest(conn net.Conn, serialPort serialport, request string, debug
 		conn.Write([]byte("+"))
 		conn.Write([]byte(formatGdbPacket("S05")))
 	case strings.Contains(request, "qSupported"):
-		msg := "PacketSize=180;qXfer:features:read+"
+		msg := "PacketSize=300;qXfer:features:read+"
 		conn.Write([]byte("+"))
 		conn.Write([]byte(formatGdbPacket(msg)))
 	case string(request[0]) == "?":
