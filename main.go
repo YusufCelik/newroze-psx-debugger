@@ -415,6 +415,8 @@ func parseGdbRequest(conn net.Conn, serialPort serialport, request string) {
 			break
 		}
 
+		fmt.Printf("PSX is requesting: %s %s", addr, size)
+
 		conn.Write([]byte("+"))
 		conn.Write([]byte(formatGdbPacket(readPsxMemory(serialPort, addr, size))))
 	case string(request[0]) == "M":
@@ -456,6 +458,15 @@ func parseGdbRequest(conn net.Conn, serialPort serialport, request string) {
 		acknowledgeWithOk(conn)
 	case string(request[0]) == "c":
 		serialPort.Write([]byte("c"))
+		reader := bufio.NewReader(serialPort)
+
+		halt_reply, err := reader.ReadString('&')
+		if err != nil {
+			panic(err)
+		}
+
+		fmt.Println("Received halt reply", halt_reply)
+
 		conn.Write([]byte("+"))
 		conn.Write([]byte(formatGdbPacket("S05")))
 	case string(request[0]) == "Z":
@@ -464,6 +475,8 @@ func parseGdbRequest(conn net.Conn, serialPort serialport, request string) {
 		conn.Write([]byte("+"))
 		conn.Write([]byte(formatGdbPacket("OK")))
 	case string(request[0]) == "z":
+		bpAddr := parseBreakpointWrite(request)
+		writeBreakpointToPsx(serialPort, bpAddr)
 		conn.Write([]byte("+"))
 		conn.Write([]byte(formatGdbPacket("OK")))
 	case string(request[0]) == "s":
