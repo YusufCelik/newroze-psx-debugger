@@ -165,7 +165,6 @@ func writePsxMemory(serialPort serialport, addr string, size string, data []byte
 
 func writeBreakpointToPsx(serialPort serialport, addr string) {
 	serialPort.Write([]byte("Z"))
-	serialPort.Write([]byte(stringToPsxBytes(addr, true)))
 
 	reader := bufio.NewReader(serialPort)
 
@@ -177,7 +176,6 @@ func writeBreakpointToPsx(serialPort serialport, addr string) {
 
 func clearBreakPointFromPsx(serialPort serialport, addr string) {
 	serialPort.Write([]byte("z"))
-	serialPort.Write([]byte(stringToPsxBytes(addr, true)))
 
 	reader := bufio.NewReader(serialPort)
 
@@ -268,7 +266,7 @@ func memoryInValidRange(addr string) bool {
 	return false
 }
 
-func parseGdbRequest(conn net.Conn, serialPort serialport, request string) {
+func parseGdbRequest(conn net.Conn, serialPort serialport, cachedOpcodes map[string]string, request string) {
 	var emptyResponsesFor = []string{"qTStatus", "vMustReplyEmpty", "qC", "vCont?", "qSymbol::"}
 	var okResponseFor = []string{"Hg0", "Hg1", "Hc-1", "Hc0", "Hc1", "qThreadExtraInfo", "qfThreadInfo", "qsThreadInfo"}
 
@@ -386,11 +384,22 @@ func parseGdbRequest(conn net.Conn, serialPort serialport, request string) {
 		conn.Write([]byte(formatGdbPacket("S05")))
 	case string(request[0]) == "Z":
 		bpAddr := parseBreakpointWrite(request)
+		opcode := readPsxMemory(serialPort, bpAddr, "00000004")
+
+		if _, ok := cachedOpcodes[bpAddr]; !ok {
+			cachedOpcodes[bpAddr] = opcode
+		}
+
+		writePsxMemory(serialPort, bpAddr, "00000004", stringToPsxBytes("0000000d", true))
+
 		writeBreakpointToPsx(serialPort, bpAddr)
 		conn.Write([]byte("+"))
 		conn.Write([]byte(formatGdbPacket("OK")))
 	case string(request[0]) == "z":
 		bpAddr := parseBreakpointWrite(request)
+
+		writePsxMemory(serialPort, bpAddr, "00000004", stringToPsxBytes(cachedOpcodes[bpAddr], false))
+
 		clearBreakPointFromPsx(serialPort, bpAddr)
 		conn.Write([]byte("+"))
 		conn.Write([]byte(formatGdbPacket("OK")))
@@ -422,7 +431,7 @@ func parseGdbRequest(conn net.Conn, serialPort serialport, request string) {
 	}
 }
 
-func handlePacket(conn net.Conn, serialPort serialport, packet string) {
+func handlePacket(conn net.Conn, serialPort serialport, cachedOpcodes map[string]string, packet string) {
 	if packet == "+" {
 		return
 	}
@@ -441,10 +450,10 @@ func handlePacket(conn net.Conn, serialPort serialport, packet string) {
 		return
 	}
 
-	parseGdbRequest(conn, serialPort, packet[startIndex+1:endIndex])
+	parseGdbRequest(conn, serialPort, cachedOpcodes, packet[startIndex+1:endIndex])
 }
 
-func handleGdbClient(conn net.Conn, serialPort serialport) {
+func handleGdbClient(conn net.Conn, serialPort serialport, cachedOpcodes map[string]string) {
 	defer conn.Close()
 
 	var buff [2048]byte
@@ -461,7 +470,7 @@ func handleGdbClient(conn net.Conn, serialPort serialport) {
 		request := string(buff[0:bytesRead])
 
 		if bytesRead > 0 {
-			handlePacket(conn, serialPort, request)
+			handlePacket(conn, serialPort, cachedOpcodes, request)
 		}
 	}
 }
@@ -469,6 +478,8 @@ func handleGdbClient(conn net.Conn, serialPort serialport) {
 func main() {
 	serialdevicePtr := flag.String("device", "", "Serial device, e.g. /dev/ttyUSB0")
 	tcpPortPtr := flag.String("port", "8888", "GDB port")
+
+	cachedOpcodes := make(map[string]string)
 
 	flag.Parse()
 
@@ -504,7 +515,7 @@ func main() {
 			continue
 		}
 
-		handleGdbClient(conn, port)
+		handleGdbClient(conn, port, cachedOpcodes)
 	}
 
 	defer port.Close()
